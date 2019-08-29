@@ -1127,6 +1127,13 @@ namespace ParticleSimulator{
         const S32 n_loc_ep = epj_org.size();
         tp_glb.resizeNoInitialize( n_loc_ep );
         if(!flag_reuse){
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(n_loc, n_loc_ep, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++){
+                    tp_glb[i].setFromEP(epj_org[i], i);
+                }
+            });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel
 #endif
@@ -1138,6 +1145,7 @@ namespace ParticleSimulator{
                     tp_glb[i].setFromEP(epj_org[i], i);
                 }
             }
+#endif
         }
     }
 

@@ -49,8 +49,26 @@ namespace ParticleSimulator{
         U32 adr_ptcl_;
         S32 level_;
         Tmom mom_;
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        ReallocatableArray<S32> * adr_epj;
+        /* U64 work; */
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+        S32 cpu;
+#endif
+#ifdef RECORD_TIMELINE
+        U64 start_time;
+        U64 end_time;
+#endif
+#endif
         TreeCell(){
             n_ptcl_ = adr_tc_ = adr_ptcl_ = level_ = 0;
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            adr_epj = NULL;
+            /* work = 0; */
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+            cpu = -1;
+#endif
+#endif
             mom_.init();
         }
         void clear(){
@@ -275,6 +293,17 @@ namespace ParticleSimulator{
         S32 n_ptcl_;
         S32 adr_ptcl_;
         F64ort vertex_in_;
+#ifdef RECORD_SPLIT
+        F64vec center;
+        F64 half_length;
+#endif
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+        S32 cpu;
+#endif
+#ifdef RECORD_TIMELINE
+        U64 start_time;
+        U64 end_time;
+#endif
         template<class Ttc>
         void copyFromTC(const Ttc & tc){
             n_ptcl_ = tc.n_ptcl_;
@@ -288,6 +317,17 @@ namespace ParticleSimulator{
         S32 n_ptcl_;
         S32 adr_ptcl_;
         F64ort vertex_in_;
+#ifdef RECORD_SPLIT
+        F64vec center;
+        F64 half_length;
+#endif
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+        S32 cpu;
+#endif
+#ifdef RECORD_TIMELINE
+        U64 start_time;
+        U64 end_time;
+#endif
         template<class Ttc>
         void copyFromTC(const Ttc & tc){
             n_ptcl_ = tc.n_ptcl_;
@@ -303,6 +343,17 @@ namespace ParticleSimulator{
         S32 adr_ptcl_;
         F64ort vertex_in_;
         F64ort vertex_out_;
+#ifdef RECORD_SPLIT
+        F64vec center;
+        F64 half_length;
+#endif
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+        S32 cpu;
+#endif
+#ifdef RECORD_TIMELINE
+        U64 start_time;
+        U64 end_time;
+#endif
         template<class Ttc>
         void copyFromTC(const Ttc & tc){
             n_ptcl_ = tc.n_ptcl_;
@@ -318,6 +369,17 @@ namespace ParticleSimulator{
         S32 n_ptcl_;
         S32 adr_ptcl_;
         F64ort vertex_out_;
+#ifdef RECORD_SPLIT
+        F64vec center;
+        F64 half_length;
+#endif
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+        S32 cpu;
+#endif
+#ifdef RECORD_TIMELINE
+        U64 start_time;
+        U64 end_time;
+#endif
         template<class Ttc>
         void copyFromTC(const Ttc & tc){
             n_ptcl_ = tc.n_ptcl_;

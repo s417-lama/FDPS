@@ -2,6 +2,8 @@
 #include<cassert>
 #include<iostream>
 
+#define DISABLE_MEMORY_POOL
+
 //#define PARTICLE_SIMULATOR_ROUND_UP_CAPACITY
 
 namespace  ParticleSimulator{
@@ -46,6 +48,9 @@ namespace  ParticleSimulator{
         void constructorFunction(const int cap){
             capacity_ = getNewCapacity(cap);
             checkCapacityOverInConstructor();
+#ifdef DISABLE_MEMORY_POOL
+            data_ = new T[capacity_];
+#else
             if(alloc_mode_ == 0){
                 data_ = new T[capacity_];
             }
@@ -59,6 +64,7 @@ namespace  ParticleSimulator{
                     data_ = (T*)ret;
                 }
             }
+#endif
         }
         
 #if SANITY_CHECK_REALLOCATABLE_ARRAY > 0
@@ -101,6 +107,14 @@ namespace  ParticleSimulator{
             //capacity_ = new_cap;
             capacity_ = getNewCapacity(new_cap);
             T * data_old = data_;
+#ifdef DISABLE_MEMORY_POOL
+            T * data_new = new T[capacity_];
+            for( int i=0; i<size_; i++){
+                data_new[i] = data_old[i];
+            }
+            data_ = data_new;
+            delete[] data_old;
+#else
             if(alloc_mode_ == 0){
                 T * data_new = new T[capacity_];
                 for( int i=0; i<size_; i++){
@@ -127,6 +141,7 @@ namespace  ParticleSimulator{
                     }
                 }
             }
+#endif
         }
     public:
 #if SANITY_CHECK_REALLOCATABLE_ARRAY > 0
@@ -153,6 +168,9 @@ namespace  ParticleSimulator{
         }
 #endif
         ~ReallocatableArray(){
+#ifdef DISABLE_MEMORY_POOL
+            if(capacity_ > 0) delete [] data_;
+#else
             if(alloc_mode_ == 0){
                 if(capacity_ > 0) delete [] data_;
             }
@@ -164,6 +182,7 @@ namespace  ParticleSimulator{
                     if(capacity_ > 0) MemoryPool::freeMem(id_mpool_);
                 }
             }
+#endif
             data_ = NULL;
         }
         
@@ -291,6 +310,9 @@ namespace  ParticleSimulator{
 #endif
             const int new_cap = std::max(getNewCapacity((n+(n+10)/10)+100), capacity_org_);
             if(data_ == NULL){
+#ifdef DISABLE_MEMORY_POOL
+                data_ = new T[new_cap];
+#else
                 if(alloc_mode_ == 0){data_ = new T[new_cap];}
                 else if(alloc_mode_ == 1){
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
@@ -302,6 +324,7 @@ namespace  ParticleSimulator{
                         data_ = (T*)ret;
                     }
                 }
+#endif
                 capacity_ = new_cap;
                 size_ = n;
             }
@@ -408,6 +431,20 @@ namespace  ParticleSimulator{
             }
         }
         void freeMem(const int free_alloc_mode = -1){
+#ifdef DISABLE_MEMORY_POOL
+            if (free_alloc_mode == -1 || free_alloc_mode == 0) {
+                if(capacity_ > 0){
+                    capacity_org_ = capacity_;
+                    size_ = capacity_ = 0;
+                    delete [] data_;
+                    capacity_ = 10;
+                    data_ = new T[capacity_];
+                }
+                else{
+                    capacity_org_ = 0;
+                }
+            }
+#else
             if( alloc_mode_ == 0 && (free_alloc_mode == -1  || free_alloc_mode == 0) ){
                 if(capacity_ > 0){
                     capacity_org_ = capacity_;
@@ -434,6 +471,7 @@ namespace  ParticleSimulator{
                     id_mpool_ = -1;
                 }
             }
+#endif
         }
     };
 }

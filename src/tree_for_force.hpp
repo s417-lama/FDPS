@@ -106,6 +106,10 @@ namespace ParticleSimulator{
 
         S32 n_surface_for_comm_;
 
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+        TreeNode * N0_;
+#endif
+
         // new variables for commnuication of LET
         // for scatterEP
         //ReallocatableArray<Tepj> * ep_send_buf_for_scatter_;
@@ -527,6 +531,21 @@ namespace ParticleSimulator{
         void calcForce(Tfunc_ep_ep pfunc_ep_ep,
                        const bool clear=true);
 
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        template<class Tfunc_ep_ep, class Ttc>
+        void calcForceTpImpl(Tfunc_ep_ep pfunc_ep_ep,
+                             const ReallocatableArray<Ttc> & tc_first,
+                             const ReallocatableArray<Tepi> & epi_first,
+                             const S32 adr_tc,
+                             const S32 n_grp_limit,
+                             const bool reuse);
+
+        template<class Tfunc_ep_ep>
+        void calcForceTp(Tfunc_ep_ep pfunc_ep_ep,
+                         const bool clear,
+                         const bool reuse);
+#endif
+
         template<class Tfunc_ep_ep>
         void calcForceWalkOnly(Tfunc_ep_ep pfunc_ep_ep,
                                const bool clear=true);
@@ -695,7 +714,8 @@ namespace ParticleSimulator{
         }
         template<class Tfunc_ep_ep>
         void calcForceNoWalk(Tfunc_ep_ep pfunc_ep_ep,
-                             const bool clear=true);
+                             const bool clear=true,
+                             const bool reuse=false);
         template<class Tfunc_ep_ep, class Tfunc_ep_sp>
         void calcForceNoWalk(Tfunc_ep_ep pfunc_ep_ep,
                              Tfunc_ep_sp pfunc_ep_sp,
@@ -771,11 +791,19 @@ namespace ParticleSimulator{
             if(list_mode == MAKE_LIST || list_mode == MAKE_LIST_FOR_REUSE){
                 setRootCell(dinfo);
                 
+                struct timeval tv;
+                gettimeofday(&tv, 0);
+                S64 t1 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+
                 mortonSortLocalTreeOnly();
 
                 epi_org_.freeMem(1);
 
                 linkCellLocalTreeOnly();
+
+                gettimeofday(&tv, 0);
+                S64 t2 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+                std::cout << "build_tree: " << t2 - t1 << std::endl;
 
                 calcMomentLocalTreeOnly();
 
@@ -785,22 +813,35 @@ namespace ParticleSimulator{
 
                 epj_send_.freeMem(1);
 
+                gettimeofday(&tv, 0);
+                t1 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+
                 mortonSortGlobalTreeOnly();
 
                 linkCellGlobalTreeOnly();
+
+                gettimeofday(&tv, 0);
+                t2 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+                std::cout << "build_tree: " << t2 - t1 << std::endl;
 
                 spj_org_.freeMem(1);
                 
                 calcMomentGlobalTreeOnly();
 
+#ifndef PARTICLE_SIMULATOR_TASK_PARALLEL
                 makeIPGroup();
+#endif
 
                 if(list_mode == MAKE_LIST){
                     calcForce(pfunc_ep_ep, clear_force);
                 }
                 else{
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+                    calcForceTp(pfunc_ep_ep, clear_force, false);
+#else
                     makeInteractionListIndexShort();
-                    calcForceNoWalk(pfunc_ep_ep, clear_force);
+                    calcForceNoWalk(pfunc_ep_ep, clear_force, false);
+#endif
                 }
                 
             }
@@ -809,7 +850,7 @@ namespace ParticleSimulator{
 
                 epi_org_.freeMem(1);
                 
-                exchangeLocalEssentialTreeReuseList(dinfo, true);
+                /* exchangeLocalEssentialTreeReuseList(dinfo, true); */
                 setLocalEssentialTreeToGlobalTree2(true);
 
                 epj_send_.freeMem(1);
@@ -818,7 +859,11 @@ namespace ParticleSimulator{
 
                 spj_org_.freeMem(1);
                 
-                calcForceNoWalk(pfunc_ep_ep, clear_force);
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+                calcForceTp(pfunc_ep_ep, clear_force, true);
+#else
+                calcForceNoWalk(pfunc_ep_ep, clear_force, true);
+#endif
             }
             else{
                 PARTICLE_SIMULATOR_PRINT_ERROR("INVALID INTERACTION_LIST_MODE.");
@@ -845,7 +890,20 @@ namespace ParticleSimulator{
                                       const bool clear_force = true,
                                       const INTERACTION_LIST_MODE list_mode = FDPS_DFLT_VAL_LIST_MODE){
             calcForceAll(pfunc_ep_ep, psys, dinfo, clear_force, list_mode); 
-            for(S32 i=0; i<n_loc_tot_; i++) psys[i].copyFromForce(force_org_[i]);
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, n_loc_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++) {
+                    psys[i].copyFromForce(force_org_[i]);
+                }
+            });
+#else
+#ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
+#pragma omp parallel for
+#endif
+            for(S32 i=0; i<n_loc_tot_; i++) {
+                psys[i].copyFromForce(force_org_[i]);
+            }
+#endif
         }
 
         template<class Tfunc_ep_ep, class Tpsys>
@@ -1423,6 +1481,97 @@ namespace ParticleSimulator{
             fout<<"center_="<<center_<<std::endl;
             fout<<"pos_root_cell_="<<pos_root_cell_<<std::endl;
         }
+
+#if RECORD_SPLIT
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+        template<class Ttc>
+        void dumpSplitImpl(std::ostream & fout,
+                           const ReallocatableArray<Ttc> & tc_first,
+                           const S32 adr_tc,
+                           const F64vec center,
+                           const F64 half_length,
+                           const S32 n_grp_limit){
+            Ttc * tc_tmp = tc_first.getPointer() + adr_tc;
+            const S32 n_tmp = tc_tmp->n_ptcl_;
+            if(n_tmp == 0) return;
+            else if( tc_tmp->isLeaf(n_grp_limit) ){
+                fout << tc_tmp->cpu << " "
+                     << center.x << " "
+                     << center.y << " "
+#ifndef PARTICLE_SIMULATOR_TWO_DIMENSION
+                     << center.z << " "
+#endif
+                     << half_length << " "
+                     << tc_tmp->n_ptcl_ << std::endl;
+                     /* << tc_tmp->n_ptcl_ << " " */
+                     /* << tc_tmp->work << std::endl; */
+            }else{
+                S32 adr_tc_tmp = tc_tmp->adr_tc_;
+                for(S32 i=0; i<N_CHILDREN; i++){
+                    dumpSplitImpl<Ttc>
+                        (fout, tc_first, adr_tc_tmp+i,
+                         center+SHIFT_CENTER[i]*half_length, half_length * 0.5,
+                         n_grp_limit);
+                }
+            }
+        }
+#endif
+
+        void dumpSplit(std::ostream & fout){
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+            dumpSplitImpl(fout, tc_loc_, 0, center_, length_ * 0.5, n_group_limit_);
+#else
+            S32 n_ipg = ipg_.size();
+            for(S32 i=0; i<n_ipg; i++){
+                fout << ipg_[i].cpu << " "
+                     << ipg_[i].center.x << " "
+                     << ipg_[i].center.y << " "
+#ifndef PARTICLE_SIMULATOR_TWO_DIMENSION
+                     << ipg_[i].center.z << " "
+#endif
+                     << ipg_[i].half_length << " "
+                     << ipg_[i].n_ptcl_ << std::endl;
+            }
+#endif
+        }
+#endif
+
+#if RECORD_TIMELINE
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+        template<class Ttc>
+        void dumpTimelineImpl(std::ostream & fout,
+                              const ReallocatableArray<Ttc> & tc_first,
+                              const S32 adr_tc,
+                              const S32 n_grp_limit){
+            Ttc * tc_tmp = tc_first.getPointer() + adr_tc;
+            const S32 n_tmp = tc_tmp->n_ptcl_;
+            if(n_tmp == 0) return;
+            else if( tc_tmp->isLeaf(n_grp_limit) ){
+                fout << tc_tmp->cpu        << " "
+                     << tc_tmp->start_time << " "
+                     << tc_tmp->end_time   << std::endl;
+            }else{
+                S32 adr_tc_tmp = tc_tmp->adr_tc_;
+                for(S32 i=0; i<N_CHILDREN; i++){
+                    dumpTimelineImpl<Ttc>(fout, tc_first, adr_tc_tmp+i, n_grp_limit);
+                }
+            }
+        }
+#endif
+
+        void dumpTimeline(std::ostream & fout){
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+            dumpTimelineImpl(fout, tc_loc_, 0, n_group_limit_);
+#else
+            S32 n_ipg = ipg_.size();
+            for(S32 i=0; i<n_ipg; i++){
+                fout << ipg_[i].cpu        << " "
+                     << ipg_[i].start_time << " "
+                     << ipg_[i].end_time   << std::endl;
+            }
+#endif
+        }
+#endif
 
         void exchangeLocalEssentialTreeUsingCommTable(){}
 

@@ -12,6 +12,7 @@
 #include<cstring>
 #include<map>
 #include "time.h"
+#include<sys/time.h>
 
 #ifdef PARTICLE_SIMULATOR_MPI_PARALLEL
 #include"mpi.h"
@@ -19,6 +20,16 @@
 
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #include<omp.h>
+#endif
+
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+#define TO_MTHREAD_NATIVE 1
+#include <myth/myth.h>
+#include <tpswitch/tpswitch.h>
+#include <mtbb/parallel_for.h>
+
+#define CUTOFF_PFOR 100
+#define CUTOFF_SORT 100
 #endif
 
 #include"memory_pool.hpp"
@@ -576,6 +587,8 @@ namespace ParticleSimulator{
           //#ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #if defined(PARTICLE_SIMULATOR_THREAD_PARALLEL) && defined(_OPENMP)
           n_thread_ = omp_get_max_threads();
+#elif defined(PARTICLE_SIMULATOR_TASK_PARALLEL)
+          n_thread_ = myth_get_num_workers();
 #else
           n_thread_ = 1;
 #endif
@@ -928,6 +941,9 @@ namespace ParticleSimulator{
                                   const S64 mpool_size=100000000){
 #ifdef PARTICLE_SIMULATOR_MPI_PARALLEL
         MPI_Init(&argc, &argv);
+#endif
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        myth_init();
 #endif
         MemoryPool::initialize(mpool_size);
 #ifdef MONAR
@@ -1389,10 +1405,32 @@ namespace ParticleSimulator{
         }
         return pos_box;
     }
-    
+
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+    template<class Tp>
+    void GetMinBoxTpImpl(const Tp ptcl[], F64ort * box_loc, const S32 since, const S32 until){
+        if (until - since <= CUTOFF_PFOR) {
+            for(S32 i = since; i < until; i++){
+                box_loc->merge(ptcl[i].getPos());
+            }
+        } else {
+            const S32 mid = since + (until - since) / 2;
+            F64ort box_loc_tmp;
+            mk_task_group_w(2);
+            create_taskc_w([&] { GetMinBoxTpImpl(ptcl, box_loc     , since, mid); }, 1);
+            create_taskc_w([&] { GetMinBoxTpImpl(ptcl, &box_loc_tmp, mid, until); }, 1);
+            wait_tasks;
+            box_loc->merge(box_loc_tmp);
+        }
+    }
+#endif
+
     template<class Tp>
     inline F64ort GetMinBox(const Tp ptcl[], const S32 n){
         F64ort box_loc;
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        GetMinBoxTpImpl<Tp>(ptcl, &box_loc, 0, n);
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel
 #endif //PARTICLE_SIMULATOR_THREAD_PARALLEL
@@ -1412,6 +1450,7 @@ namespace ParticleSimulator{
                 box_loc.merge(box_loc_tmp);
             }
         }
+#endif
         //std::cerr<<"box_loc="<<box_loc<<std::endl;
         const F64vec xlow_loc = box_loc.low_;
         const F64vec xhigh_loc = box_loc.high_;

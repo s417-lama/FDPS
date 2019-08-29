@@ -1,3 +1,39 @@
+# Task Parallel Implementation for FDPS
+
+Only the calculation of short-range interactions is compatible with task parallelism.
+
+The SPH dambreaking example is in sample/c++/dambreaking.
+`Makefile` depends on my environment, so please replace the path of massivethreads.
+
+You can switch the method to parallelize by modifying `Makefile`.
+
+To enable OpenMP, comment out
+```
+CFLAGS += -DPARTICLE_SIMULATOR_THREAD_PARALLEL -fopenmp
+```
+
+To enable MassiveThreads, comment out
+```
+CFLAGS += -DPARTICLE_SIMULATOR_TASK_PARALLEL -I$(MYTH_PATH)/include
+LIBS = -lmyth -L $(MYTH_PATH)/lib -Wl,-R$(MYTH_PATH)/lib
+```
+
+Run
+```
+make
+./sph.out
+```
+
+To configure the settings, modify samples/c++/dambreaking/kernel.h.
+
+* `DAM_2D`: 2d simulation for dambreaking
+* `LARGE`: large dataset ONLY for 2d
+* `REUSE`: whether to reuse the neighbor list across several iterations
+* `OUTPUT`: output the positions of particles per `OUTPUT_INTERVAL`
+* `DOUBLE`: double precision or single precision
+
+It uses tpswitch.
+
 # FDPS
 
 FDPS is a general-purpose, high-performance library for particle simulations.

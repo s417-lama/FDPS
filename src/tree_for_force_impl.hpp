@@ -204,6 +204,14 @@ namespace ParticleSimulator{
         epj_org_.resizeNoInitialize(n_loc_tot_);
         epi_org_.resizeNoInitialize(n_loc_tot_);
         if(clear){
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, nloc, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++){
+                    epi_org_[i].copyFromFP( psys[i] );
+                    epj_org_[i].copyFromFP( psys[i] );
+                }
+            });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for
 #endif
@@ -211,8 +219,17 @@ namespace ParticleSimulator{
                 epi_org_[i].copyFromFP( psys[i] );
                 epj_org_[i].copyFromFP( psys[i] );
             }
+#endif
         }
         else{
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, nloc, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++){
+                    epi_org_[i+offset].copyFromFP( psys[i] );
+                    epj_org_[i+offset].copyFromFP( psys[i] );
+                }
+            });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for
 #endif
@@ -220,6 +237,7 @@ namespace ParticleSimulator{
                 epi_org_[i+offset].copyFromFP( psys[i] );
                 epj_org_[i+offset].copyFromFP( psys[i] );
             }
+#endif
         }
 #ifdef PARTICLE_SIMULATOR_DEBUG_PRINT
         PARTICLE_SIMULATOR_PRINT_LINE_INFO();
@@ -274,6 +292,14 @@ namespace ParticleSimulator{
             //tp_glb_.resizeNoInitialize(n_loc_tot_);
             ReallocatableArray<TreeParticle> tp_buf(n_loc_tot_, n_loc_tot_, 1);
             MortonKey::initialize( length_ * 0.5, center_);
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, n_loc_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++){
+                    //tp_loc_[i].setFromEP(epj_org_[i], i);
+                    tp_glb_[i].setFromEP(epj_org_[i], i);
+                }
+            });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for
 #endif
@@ -281,6 +307,7 @@ namespace ParticleSimulator{
                 //tp_loc_[i].setFromEP(epj_org_[i], i);
                 tp_glb_[i].setFromEP(epj_org_[i], i);
             }
+#endif
 #ifdef USE_STD_SORT
             //std::sort(tp_loc_.getPointer(), tp_loc_.getPointer()+n_loc_tot_, 
             //          [](const TreeParticle & l, const TreeParticle & r )
@@ -290,17 +317,42 @@ namespace ParticleSimulator{
                       ->bool{return l.getKey() < r.getKey();} );            
 
 #else
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            sortBodies(tp_glb_.getPointer(), tp_buf.getPointer(), 0, n_loc_tot_,
+                       n_leaf_limit_, &N0_);
+#else
             //rs_.lsdSort(tp_loc_.getPointer(), tp_buf.getPointer(), 0, n_loc_tot_-1);
             rs_.lsdSort(tp_glb_.getPointer(), tp_buf.getPointer(), 0, n_loc_tot_-1);
+#endif
+#endif
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, n_loc_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i = a; i < b; i++){
+                    const S32 adr = tp_glb_[i].adr_ptcl_;
+                    adr_org_from_adr_sorted_loc_[i] = adr;
+                }
+            });
+#else
+#ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
+#pragma omp parallel for
 #endif
             for(S32 i=0; i<n_loc_tot_; i++){
                 //const S32 adr = tp_loc_[i].adr_ptcl_;
                 const S32 adr = tp_glb_[i].adr_ptcl_;
                 adr_org_from_adr_sorted_loc_[i] = adr;
             }
+#endif
             tp_buf.freeMem(1);
         } // end of if() no reuse
-        
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        mtbb::parallel_for(0, n_loc_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+            for(S32 i=a; i<b; i++){
+                const S32 adr = adr_org_from_adr_sorted_loc_[i];
+                epi_sorted_[i] = epi_org_[adr];
+                epj_sorted_[i] = epj_org_[adr];
+            }
+        });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for
 #endif
@@ -309,6 +361,7 @@ namespace ParticleSimulator{
             epi_sorted_[i] = epi_org_[adr];
             epj_sorted_[i] = epj_org_[adr];
         }
+#endif
 #ifdef PARTICLE_SIMULATOR_DEBUG_PRINT
         PARTICLE_SIMULATOR_PRINT_LINE_INFO();
         std::cout<<"epi_sorted_.size()="<<epi_sorted_.size()<<" epj_sorted_.size()="<<epj_sorted_.size()<<std::endl;
@@ -345,7 +398,13 @@ namespace ParticleSimulator{
     void TreeForForce<TSM, Tforce, Tepi, Tepj, Tmomloc, Tmomglb, Tspj>::
     linkCellLocalTreeOnly(){
         const F64 time_offset = GetWtime();
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+        tc_loc_.resizeNoInitialize(N0_->NNODE);
+        nodes2cells(N0_, tc_loc_.getPointer(), 0, 1, &lev_max_loc_, 0);
+        delete N0_;
+#else
         LinkCell(tc_loc_,  adr_tc_level_partition_loc_, tp_glb_.getPointer(), lev_max_loc_, n_loc_tot_, n_leaf_limit_);
+#endif
 #ifdef PARTICLE_SIMULATOR_DEBUG_PRINT
         PARTICLE_SIMULATOR_PRINT_LINE_INFO();
         std::cout<<"tc_loc_.size()="<<tc_loc_.size()<<std::endl;
@@ -458,15 +517,28 @@ namespace ParticleSimulator{
                       [](const TreeParticle & l, const TreeParticle & r )
                       ->bool{return l.getKey() < r.getKey();} );
 #else
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            sortBodies(tp_glb_.getPointer(), tp_buf.getPointer(), 0, n_loc_tot_,
+                       n_leaf_limit_, &N0_);
+#else
             rs_.lsdSort(tp_glb_.getPointer(), tp_buf.getPointer(), 0, n_glb_tot_-1);
 #endif
+#endif
 
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, (S32)n_glb_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++){
+                    adr_org_from_adr_sorted_glb_[i] = tp_glb_[i].adr_ptcl_;
+                }
+            });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel 
 #endif
             for(S32 i=0; i<n_glb_tot_; i++){
                 adr_org_from_adr_sorted_glb_[i] = tp_glb_[i].adr_ptcl_;
             }
+#endif
             tp_buf.freeMem(1);
         }
         if( typeid(typename TSM::force_type) == typeid(TagForceLong)){
@@ -550,6 +622,15 @@ namespace ParticleSimulator{
 #endif
         }
         else{
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+            mtbb::parallel_for(0, (S32)n_glb_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+                for(S32 i=a; i<b; i++){
+                    const U32 adr = adr_org_from_adr_sorted_glb_[i];
+                    epj_sorted_[i] = epj_org_[adr];
+                    tp_glb_[i].adr_ptcl_ = i;
+                }
+            });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for
 #endif
@@ -558,6 +639,7 @@ namespace ParticleSimulator{
                 epj_sorted_[i] = epj_org_[adr];
                 tp_glb_[i].adr_ptcl_ = i;
             }
+#endif
         }
 #ifdef PARTICLE_SIMULATOR_DEBUG_PRINT
         PARTICLE_SIMULATOR_PRINT_LINE_INFO();
@@ -575,8 +657,14 @@ namespace ParticleSimulator{
     void TreeForForce<TSM, Tforce, Tepi, Tepj, Tmomloc, Tmomglb, Tspj>::
     linkCellGlobalTreeOnly(){
         const F64 time_offset = GetWtime();
+#if PARTICLE_SIMULATOR_TASK_PARALLEL
+        tc_glb_.resizeNoInitialize(N0_->NNODE);
+        nodes2cells(N0_, tc_glb_.getPointer(), 0, 1, &lev_max_glb_, 0);
+        delete N0_;
+#else
         LinkCell(tc_glb_, adr_tc_level_partition_glb_,
                  tp_glb_.getPointer(), lev_max_glb_, n_glb_tot_, n_leaf_limit_);
+#endif
 #ifdef PARTICLE_SIMULATOR_DEBUG_PRINT
         PARTICLE_SIMULATOR_PRINT_LINE_INFO();
         std::cout<<"tc_glb_.size()="<<tc_glb_.size()<<std::endl;
@@ -683,6 +771,7 @@ namespace ParticleSimulator{
         PARTICLE_SIMULATOR_PRINT_LINE_INFO();
         std::cout<<"ipg_.size()="<<ipg_.size()<<std::endl;
 #endif
+        std::cout<<"ipg_.size()="<<ipg_.size()<<std::endl;
         time_profile_.calc_force += GetWtime() - time_offset;
         time_profile_.calc_force__make_ipgroup += GetWtime() - time_offset;
     }
@@ -721,7 +810,11 @@ namespace ParticleSimulator{
              class Tmomloc, class Tmomglb, class Tspj>
     void TreeForForce<TSM, Tforce, Tepi, Tepj, Tmomloc, Tmomglb, Tspj>::
     makeIPGroupImpl(TagForceShort){
-        MakeIPGroupShort(ipg_, tc_loc_, epi_sorted_, 0, n_group_limit_);
+        MakeIPGroupShort(ipg_, tc_loc_, epi_sorted_, 0,
+#ifdef RECORD_SPLIT
+                         center_, length_ * 0.5,
+#endif
+                         n_group_limit_);
     }
     
 
@@ -902,6 +995,14 @@ namespace ParticleSimulator{
     copyForceOriginalOrder(){
         epi_org_.freeMem(1);
         force_org_.resizeNoInitialize(n_loc_tot_);
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        mtbb::parallel_for(0, n_loc_tot_, 1, CUTOFF_PFOR, [&] (S32 a, S32 b) {
+            for(S32 i=a; i<b; i++){
+                const S32 adr = adr_org_from_adr_sorted_loc_[i];
+                force_org_[adr] = force_sorted_[i];
+            }
+        });
+#else
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for
 #endif
@@ -909,6 +1010,7 @@ namespace ParticleSimulator{
             const S32 adr = adr_org_from_adr_sorted_loc_[i];
             force_org_[adr] = force_sorted_[i];
         }
+#endif
     }
     
     // return forces in original order

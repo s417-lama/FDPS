@@ -531,6 +531,52 @@ namespace ParticleSimulator{
         }
     }
 
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+    template<class Ttc, class Tepj>
+    void CalcMomentTpImpl(Ttc * tc,
+                          Tepj * epj,
+                          const S32 adr_tc,
+                          const S32 n_leaf_limit){
+        Ttc * tc_tmp = tc + adr_tc;
+        tc_tmp->mom_.init();
+        const S32 n_tmp = tc_tmp->n_ptcl_;
+        if(n_tmp == 0) {
+            return;
+        }
+        else if( tc_tmp->isLeaf(n_leaf_limit) ){
+            const S32 adr = tc_tmp->adr_ptcl_;
+            for(S32 k=adr; k<adr+n_tmp; k++){
+                tc_tmp->mom_.accumulateAtLeaf(epj[k]);
+            }
+            tc_tmp->mom_.set();
+            for(S32 k=adr; k<adr+n_tmp; k++){
+                tc_tmp->mom_.accumulateAtLeaf2(epj[k]);
+            }
+        }else{
+            S32 adr_tc_tmp = tc_tmp->adr_tc_;
+            mk_task_group_w(tc_tmp->n_ptcl_);
+            for(S32 i=0; i<N_CHILDREN; i++){
+                const Ttc * tc_child = tc + adr_tc_tmp + i;
+                auto lambda = [&, i] {
+                    CalcMomentTpImpl(tc, epj, adr_tc_tmp + i, n_leaf_limit);
+                };
+                create_taskc_w(lambda, tc_child->n_ptcl_);
+            }
+            wait_tasks;
+            for(S32 k=0; k<N_CHILDREN; k++){
+                Ttc * tc_tmp_tmp = tc + ((tc_tmp->adr_tc_)+k);
+                if(tc_tmp_tmp->n_ptcl_ == 0) continue;
+                tc_tmp->mom_.accumulate( tc_tmp_tmp->mom_ );
+            }
+            tc_tmp->mom_.set();
+            for(S32 k=0; k<N_CHILDREN; k++){
+                Ttc * tc_tmp_tmp = tc + ((tc_tmp->adr_tc_)+k);
+                if(tc_tmp_tmp->n_ptcl_ == 0) continue;
+                tc_tmp->mom_.accumulate2( tc_tmp_tmp->mom_ );
+            }
+        }
+    }
+#endif
 
     /////////////////////
     //// CALC MOMENT ////
@@ -541,6 +587,9 @@ namespace ParticleSimulator{
                            Tepj epj[],
                            const S32 lev_max,
                            const S32 n_leaf_limit){
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+        CalcMomentTpImpl(tc, epj, 0, n_leaf_limit);
+#else
         for(S32 i=lev_max; i>=0; --i){
             const S32 head = adr_tc_level_partition[i];
             const S32 next = adr_tc_level_partition[i+1];
@@ -577,6 +626,7 @@ namespace ParticleSimulator{
                 }
             }
         }
+#endif
     }
 
     template<class Ttc, class Tepj>
@@ -784,6 +834,10 @@ namespace ParticleSimulator{
                                  const ReallocatableArray<Ttc> & tc_first,
                                  const ReallocatableArray<Tepi> & epi_first,
                                  const S32 adr_tc,
+#ifdef RECORD_SPLIT
+                                 const F64vec center,
+                                 const F64 half_length,
+#endif
                                  const S32 n_grp_limit){
         const Ttc * tc_tmp = tc_first.getPointer() + adr_tc;
         const S32 n_tmp = tc_tmp->n_ptcl_;
@@ -791,13 +845,21 @@ namespace ParticleSimulator{
         else if( tc_tmp->isLeaf(n_grp_limit) ){
             ipg_first.increaseSize();
             ipg_first.back().copyFromTC(*tc_tmp);
+#ifdef RECORD_SPLIT
+            ipg_first.back().center      = center;
+            ipg_first.back().half_length = half_length;
+#endif
             return;
         }
         else{
             S32 adr_tc_tmp = tc_tmp->adr_tc_;
             for(S32 i=0; i<N_CHILDREN; i++){
                 MakeIPGroupShort<Tipg, Ttc, Tepi>
-                    (ipg_first, tc_first, epi_first, adr_tc_tmp+i, n_grp_limit);
+                    (ipg_first, tc_first, epi_first, adr_tc_tmp+i,
+#ifdef RECORD_SPLIT
+                     center+SHIFT_CENTER[i]*half_length, half_length * 0.5,
+#endif
+                     n_grp_limit);
             }
         }
     }

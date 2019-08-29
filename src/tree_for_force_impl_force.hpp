@@ -1348,6 +1348,131 @@ namespace ParticleSimulator{
         time_profile_.calc_force += GetWtime() - time_offset;
     }
 
+#ifdef PARTICLE_SIMULATOR_TASK_PARALLEL
+    template<class TSM, class Tforce, class Tepi, class Tepj,
+             class Tmomloc, class Tmomglb, class Tspj>
+    template<class Tfunc_ep_ep, class Ttc>
+    void TreeForForce<TSM, Tforce, Tepi, Tepj, Tmomloc, Tmomglb, Tspj>::
+    calcForceTpImpl(Tfunc_ep_ep pfunc_ep_ep,
+                    const ReallocatableArray<Ttc> & tc_first,
+                    const ReallocatableArray<Tepi> & epi_first,
+                    const S32 adr_tc,
+                    const S32 n_grp_limit,
+                    const bool reuse){
+        Ttc * tc_tmp = tc_first.getPointer() + adr_tc;
+        const S32 n_tmp = tc_tmp->n_ptcl_;
+        if(n_tmp == 0) {
+            /* if (!reuse) { */
+            /*     tc_tmp->work = 0; */
+            /* } */
+            return;
+        }
+        else if( tc_tmp->isLeaf(n_grp_limit) ){
+#ifdef RECORD_TIMELINE
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            tc_tmp->start_time = ts.tv_sec * 1000 * 1000 * 1000 + ts.tv_nsec;
+#endif
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+            tc_tmp->cpu = sched_getcpu();
+#endif
+            if (!reuse) {
+                const F64 r_crit_sq = 999.9;
+                TargetBox<TSM> target_box;
+                target_box.vertex_out_ = tc_tmp->mom_.vertex_out_;
+                if (tc_tmp->adr_epj == NULL) {
+                    tc_tmp->adr_epj = new ReallocatableArray<S32>;
+                } else {
+                    tc_tmp->adr_epj->clearSize();
+                }
+                MakeListUsingTreeRecursiveTop
+                    <TSM, TreeCell<Tmomglb>, TreeParticle, Tepj,
+                     WALK_MODE_NORMAL, TagChopLeafTrue>
+                    (tc_glb_, 0, tp_glb_,
+                     epj_sorted_, *tc_tmp->adr_epj,
+                     target_box,
+                     r_crit_sq,
+                     n_leaf_limit_,
+                     F64vec(0.0));
+            }
+            const S32 ith          = myth_get_worker_num();
+            const S32 n_epi        = tc_tmp->n_ptcl_;
+            const S32 adr_epi_head = tc_tmp->adr_ptcl_;
+            const S32 n_epj        = tc_tmp->adr_epj->size();
+            /* if (!reuse) { */
+            /*     tc_tmp->work = n_epi * n_epj; */
+            /* } */
+            epj_for_force_[ith].resizeNoInitialize(n_epj);
+            for(S32 j=0; j<n_epj; j++){
+                const S32 adr_epj = (*tc_tmp->adr_epj)[j];
+                epj_for_force_[ith][j] = epj_sorted_[adr_epj];
+            }
+            pfunc_ep_ep(epi_sorted_.getPointer(adr_epi_head),     n_epi,
+                        epj_for_force_[ith].getPointer(),   n_epj,
+                        force_sorted_.getPointer(adr_epi_head));
+#ifdef RECORD_TIMELINE
+            clock_gettime(CLOCK_REALTIME, &ts);
+            tc_tmp->end_time = ts.tv_sec * 1000 * 1000 * 1000 + ts.tv_nsec;
+#endif
+        }else{
+            S32 adr_tc_tmp = tc_tmp->adr_tc_;
+            /* mk_task_group_w(reuse ? tc_tmp->work : tc_tmp->n_ptcl_); */
+            mk_task_group_w(tc_tmp->n_ptcl_);
+            for(S32 i=0; i<N_CHILDREN; i++){
+                const Ttc * tc_child = tc_first.getPointer() + adr_tc_tmp + i;
+                auto lambda = [&, i] {
+                    calcForceTpImpl<Tfunc_ep_ep, Ttc>
+                    (pfunc_ep_ep, tc_first, epi_first, adr_tc_tmp+i, n_grp_limit, reuse);
+                };
+                /* create_taskc_w(lambda, (reuse ? tc_child->work : tc_child->n_ptcl_)); */
+                create_taskc_w(lambda, tc_child->n_ptcl_);
+            }
+            wait_tasks;
+            /* if (!reuse) { */
+            /*     // set amount of work for ADWS in massivethreads */
+            /*     tc_tmp->work = 0; */
+            /*     for(S32 i=0; i<N_CHILDREN; i++){ */
+            /*         const Ttc * tc_child = tc_first.getPointer() + adr_tc_tmp + i; */
+            /*         tc_tmp->work += tc_child->work; */
+            /*     } */
+            /* } */
+        }
+    }
+
+    template<class TSM, class Tforce, class Tepi, class Tepj,
+             class Tmomloc, class Tmomglb, class Tspj>
+    template<class Tfunc_ep_ep>
+    void TreeForForce<TSM, Tforce, Tepi, Tepj, Tmomloc, Tmomglb, Tspj>::
+    calcForceTp(Tfunc_ep_ep pfunc_ep_ep,
+                const bool clear,
+                const bool reuse){
+        F64 time_offset = GetWtime();
+
+        force_sorted_.resizeNoInitialize(n_loc_tot_);
+        if(clear){
+            for(S32 i=0; i<n_loc_tot_; i++){
+                force_sorted_[i].clear();
+            }
+        }
+
+        struct timeval tv;
+        gettimeofday(&tv, 0);
+        S64 t1 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+
+        calcForceTpImpl(pfunc_ep_ep, tc_loc_, epi_sorted_, 0, n_group_limit_, reuse);
+
+        gettimeofday(&tv, 0);
+        S64 t2 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+        if (reuse) {
+          std::cout << "particle_interaction: " << t2 - t1 << std::endl;
+        }
+
+        copyForceOriginalOrder();
+
+        time_profile_.calc_force += GetWtime() - time_offset;
+    }
+#endif
+
     template<class TSM, class Tforce, class Tepi, class Tepj,
              class Tmomloc, class Tmomglb, class Tspj>
     template<class Tfunc_ep_ep>
@@ -1522,7 +1647,8 @@ namespace ParticleSimulator{
     template<class Tfunc_ep_ep>
     void TreeForForce<TSM, Tforce, Tepi, Tepj, Tmomloc, Tmomglb, Tspj>::
     calcForceNoWalk(Tfunc_ep_ep pfunc_ep_ep,
-                    const bool clear){
+                    const bool clear,
+                    const bool reuse){
         F64 time_offset = GetWtime();
         force_sorted_.resizeNoInitialize(n_loc_tot_);
         //force_org_.resizeNoInitialize(n_loc_tot_);
@@ -1535,30 +1661,55 @@ namespace ParticleSimulator{
             }
         }
         S64 n_interaction_ep_ep_tmp = 0;
+
+        struct timeval tv;
+        gettimeofday(&tv, 0);
+        S64 t1 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+
         const S64 n_ipg = ipg_.size();
         if(n_ipg > 0){
 #ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for schedule(dynamic, 4) reduction(+ : n_interaction_ep_ep_tmp)
+/* #pragma omp parallel for schedule(guided, 1) reduction(+ : n_interaction_ep_ep_tmp) */
 #endif
             for(S32 i=0; i<n_ipg; i++){
+#ifdef RECORD_TIMELINE
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ipg_[i].start_time = ts.tv_sec * 1000 * 1000 * 1000 + ts.tv_nsec;
+#endif
                 const S32 ith = Comm::getThreadNum();
                 const S32 n_epi = ipg_[i].n_ptcl_;
                 const S32 adr_epi_head = ipg_[i].adr_ptcl_;
                 const S32 n_epj = interaction_list_.n_ep_[i];
                 const S32 adr_epj_head = interaction_list_.n_disp_ep_[i];
                 const S32 adr_epj_end  = interaction_list_.n_disp_ep_[i+1];
-                n_interaction_ep_ep_tmp += ipg_[i].n_ptcl_ * n_epj;
+                /* n_interaction_ep_ep_tmp += ipg_[i].n_ptcl_ * n_epj; */
                 epj_for_force_[ith].resizeNoInitialize(n_epj);
                 S32 n_cnt = 0;
                 for(S32 j=adr_epj_head; j<adr_epj_end; j++, n_cnt++){
                     const S32 adr_epj = interaction_list_.adr_ep_[j];
                     epj_for_force_[ith][n_cnt] = epj_sorted_[adr_epj];
                 }
+#if defined(RECORD_SPLIT) || defined(RECORD_TIMELINE)
+                ipg_[i].cpu = sched_getcpu();
+#endif
                 pfunc_ep_ep(epi_sorted_.getPointer(adr_epi_head),     n_epi,
                             epj_for_force_[ith].getPointer(),   n_epj,
                             force_sorted_.getPointer(adr_epi_head));
+#ifdef RECORD_TIMELINE
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ipg_[i].end_time = ts.tv_sec * 1000 * 1000 * 1000 + ts.tv_nsec;
+#endif
             }
         }
+
+        gettimeofday(&tv, 0);
+        S64 t2 = tv.tv_sec * 1000 * 1000 + tv.tv_usec;
+        if (reuse) {
+          std::cout << "particle_interaction: " << t2 - t1 << std::endl;
+        }
+
         n_interaction_ep_ep_local_ += n_interaction_ep_ep_tmp;
         copyForceOriginalOrder();
         time_profile_.calc_force += GetWtime() - time_offset;
